@@ -10,12 +10,12 @@
 # type: ignore
 
 def init(context):
-    # 初始化函数，全局只运行一次
-    set_benchmark('000300.SH')  # 设置基准收益：沪深300指数
+    # 初始化函数
+    set_benchmark('000300.SH')
     log.info('微盘股双低轮动策略开始运行')
     
     # 设置交易成本与规则
-    set_commission(PerShare(type='stock', cost=0.0,min_trade_cost=0.0))  # 手续费万分之二
+    set_commission(PerShare(type='stock', cost=0.0, min_trade_cost=0.0))  # 手续费万分之二
     set_slippage(PriceSlippage(0.005))  # 双边滑点0.5%
     set_volume_limit(0.25, 0.5)  # 日级最大成交比例25%，分钟级50%
     
@@ -57,8 +57,8 @@ def handle_bar(context, bar_dict):
     
     
     # 3. 按双低标准排序：先市值升序，再换手率升序
-    df_stocks = df_stocks.sort_values(['market_cap'], [True])
-    df_stocks = df_stocks.head(400).sort_values(['turnover_250d'], [True])
+    df_stocks = df_stocks.sort_values(by='market_cap', ascending=True)
+    df_stocks = df_stocks.head(400).sort_values(by='turnover_250d', ascending=True)
     target_stocks = list(df_stocks.head(g.hold_num)['symbol'])
     
     # 4. 执行调仓
@@ -215,7 +215,7 @@ def rebalance_portfolio(context, target_stocks):
         if current_price > 0:
             # 计算目标股数（向下取整到100的整数倍）
             target_shares = int(target_value_per_stock / current_price)
-            target_shares = target_shares // 100 * 100  # 确保是100的整数倍
+            target_shares = round(target_shares / 100) * 100 # 确保是100的整数倍
             
             if target_shares > 0:
                 # 获取当前持仓数量

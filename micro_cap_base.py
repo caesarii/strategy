@@ -48,7 +48,9 @@ def handle_bar(context, bar_dict):
     
     # 3. 按双低标准排序：先市值升序，再换手率升序
     df_stocks = df_stocks.sort_values(by='market_cap', ascending=True)
+
     df_stocks = df_stocks.head(400).sort_values(by='turnover_250d', ascending=True)
+    
     target_stocks = list(df_stocks.head(g.hold_num)['symbol'])
     
     # 4. 执行调仓
