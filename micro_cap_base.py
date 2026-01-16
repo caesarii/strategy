@@ -1,5 +1,7 @@
 # 微盘股双低轮动策略
-# 策略逻辑：每5个交易日，买入全A股中（剔除ST、科创板、退市整理股）市值最小且250日换手率最低的20只股票，等权重持仓
+# 股票池: 1. 排除科创板 \ 创业板 \ ST \* ST \ 退市整理股; 
+# 双低策略: 总市值 + 250天换手率
+# 周期: 5天
 
 def init(context):
     # 初始化函数，全局只运行一次
@@ -18,20 +20,15 @@ def init(context):
     g.last_trade_date = None  # 记录上次调仓日期
 
 def before_trading(context):
-    # 盘前运行（可选：用于数据预处理）
     date = get_datetime().strftime('%Y-%m-%d %H:%M:%S')
-    # log.info('{} 盘前运行'.format(date))
 
 def handle_bar(context, bar_dict):
-    # 主交易逻辑，每交易日执行
-    current_date = get_datetime().strftime('%Y-%m-%d %H:%M:%S')
     g.days += 1  # 计数交易日
     
     # 检查是否到达调仓日（每5天一次）
     if g.days % g.period != 0 and g.last_trade_date != get_datetime().date():
-        return  # 非调仓日不操作
+        return  
     
-    # log.info('开始调仓日选股流程')
     g.last_trade_date = get_datetime().date()
     
     # 1. 获取股票池并过滤风险股票
@@ -51,17 +48,14 @@ def handle_bar(context, bar_dict):
     df_stocks = df_stocks.sort_values(['market_cap', 'turnover_250d'], ascending=[True, True])
     target_stocks = list(df_stocks.head(g.hold_num)['symbol'])
     
-    # 4. 执行调仓：卖出不在目标列表的股票，买入新股票
+    # 4. 执行调仓
     rebalance_portfolio(context, target_stocks)
 
 def after_trading(context):
-    # 盘后运行（可选：记录日志）
     time = get_datetime().strftime('%Y-%m-%d %H:%M:%S')
-    # log.info('{} 盘后运行'.format(time))
 
 
 def get_stock_pool(context):
-    """获取初始股票池并过滤风险股票"""
     # 获取全A股股票列表
     all_stocks = get_all_securities('stock', get_datetime()).index.tolist()
     filtered_stocks = []
@@ -90,7 +84,6 @@ def get_stock_pool(context):
     return filtered_stocks
 
 def get_stock_metrics(stock_list, context):
-    """计算股票的市值和250日换手率"""
     import pandas as pd
     data_list = []
     
@@ -99,18 +92,14 @@ def get_stock_metrics(stock_list, context):
             # 获取总市值（亿元）
             fundamental_data = get_fundamentals(
                 query(valuation.market_cap).filter(valuation.symbol == stock), 
-                date=get_datetime()
+                get_datetime()
             )
             
             if fundamental_data.empty:
                 continue
                 
-            # 使用iloc[0, 0]或iat[0, 0]获取标量值，而不是Series
             market_cap_value = fundamental_data.iloc[0, 0] / 1e8  # 转换为亿元
-            # 或者使用：market_cap_value = fundamental_data.iat[0, 0] / 1e8
-            # 或者使用：market_cap_value = fundamental_data['market_cap'].iloc[0] / 1e8
             
-            # log.info('股票{}市值：{:.2f}亿元'.format(stock, market_cap_value))  # 记录标量值
             
             # 获取过去250日换手率数据
             turnover_data = history(
@@ -144,7 +133,6 @@ def get_stock_metrics(stock_list, context):
     return pd.DataFrame(data_list)
 
 def rebalance_portfolio(context, target_stocks):
-    """调整持仓至目标股票列表，等权重分配资金，数量为100股的整数倍"""
     
     # 获取当前持仓股票列表
     current_positions = list(context.portfolio.stock_account.positions.keys())
@@ -156,25 +144,25 @@ def rebalance_portfolio(context, target_stocks):
         return
     
     # 计算每只股票应分配的资金（等权重）
-    total_value = context.portfolio.total_value  # 总资产G
+    total_value = context.portfolio.total_value
     weight_per_stock = 1.0 / len(target_stocks)
     target_value_per_stock = total_value * weight_per_stock
     
-    # 卖出当前持仓中不在目标列表的股票[1](@ref)
+    # 卖出当前持仓中不在目标列表的股票
     for stock in current_positions:
         if stock not in target_stocks:
             # 记录日志[4](@ref)
             log.info('卖出不在目标列表的股票：{}'.format(stock))
-            order_target(stock, 0)  # 清仓[1](@ref)
+            order_target(stock, 0)  
     
     # 对目标股票进行等权重配置
     for stock in target_stocks:
-        # 获取当前价格来计算应买入股数[4](@ref)
+        # 获取当前价格来计算应买入股数
         current_price = history(stock, ['close'], 1, '1d', skip_paused=True, 
                               fq='pre', is_panel=1)['close'][-1]
         
         if current_price > 0:
-            # 计算目标股数（向下取整到100的整数倍）[6](@ref)
+            # 计算目标股数（向下取整到100的整数倍）
             target_shares = int(target_value_per_stock / current_price)
             target_shares = target_shares // 100 * 100  # 确保是100的整数倍
             
@@ -184,7 +172,7 @@ def rebalance_portfolio(context, target_stocks):
                 if stock in context.portfolio.stock_account.positions:
                     current_holding = context.portfolio.stock_account.positions[stock].quantity
                 
-                # 只有当目标股数与当前持仓不同时才交易[7](@ref)
+                # 只有当目标股数与当前持仓不同时才交易
                 if target_shares != current_holding:
                     log.info('调整 {} 持仓：当前{}股，目标{}股'.format(stock, current_holding, target_shares))
                     order_target(stock, target_shares)
