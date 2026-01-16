@@ -59,7 +59,7 @@ def after_trading(context):
     time = get_datetime().strftime('%Y-%m-%d %H:%M:%S')
     # log.info('{} 盘后运行'.format(time))
 
-# --- 自定义函数 ---
+
 def get_stock_pool(context):
     """获取初始股票池并过滤风险股票"""
     # 获取全A股股票列表
@@ -69,6 +69,10 @@ def get_stock_pool(context):
     for stock in all_stocks:
         # 排除科创板（代码以688开头）[7](@ref)
         if stock.startswith('688'):
+            continue
+        
+        # 排除创业板（代码以300、301开头）
+        if stock.startswith('300') or stock.startswith('301'):
             continue
         
         # 排除ST/*ST股票 [7](@ref)
@@ -82,8 +86,7 @@ def get_stock_pool(context):
         
         filtered_stocks.append(stock)
     
-    # log.info('过滤后股票池数量：{}'.format(len(filtered_stocks)))
-    # 股票代码列表['301010.SZ']
+    log.info('初步过滤后股票池数量：{}'.format(len(filtered_stocks)))
     return filtered_stocks
 
 def get_stock_metrics(stock_list, context):
@@ -123,7 +126,7 @@ def get_stock_metrics(stock_list, context):
             if len(turnover_data) == 0:
                 continue
                 
-            turnover_250d = turnover_data['turnover'].mean()  # 250日平均换手率
+            turnover_250d = turnover_data['turnover_rate'].mean()  # 250日平均换手率
             
             data_list.append({
                 'symbol': stock,  
@@ -141,17 +144,52 @@ def get_stock_metrics(stock_list, context):
     return pd.DataFrame(data_list)
 
 def rebalance_portfolio(context, target_stocks):
-    """调整持仓至目标股票列表，等权重分配"""
-    current_positions = list(context.portfolio.stock_account.positions.keys())
-    weight_per_stock = 1.0 / len(target_stocks)  # 等权重
+    """调整持仓至目标股票列表，等权重分配资金，数量为100股的整数倍"""
     
-    # 卖出当前持仓中不在目标列表的股票
+    # 获取当前持仓股票列表
+    current_positions = list(context.portfolio.stock_account.positions.keys())
+    
+    # 如果目标股票列表为空，清空所有持仓
+    if len(target_stocks) == 0:
+        for stock in current_positions:
+            order_target(stock, 0)  # 清仓
+        return
+    
+    # 计算每只股票应分配的资金（等权重）
+    total_value = context.portfolio.total_value  # 总资产G
+    weight_per_stock = 1.0 / len(target_stocks)
+    target_value_per_stock = total_value * weight_per_stock
+    
+    # 卖出当前持仓中不在目标列表的股票[1](@ref)
     for stock in current_positions:
         if stock not in target_stocks:
-            # log.info('卖出股票：{}'.format(stock))
-            order_target_percent(stock, 0)  # 清仓
+            # 记录日志[4](@ref)
+            log.info('卖出不在目标列表的股票：{}'.format(stock))
+            order_target(stock, 0)  # 清仓[1](@ref)
     
-    # 买入目标股票，等权重分配
+    # 对目标股票进行等权重配置
     for stock in target_stocks:
-        # log.info('买入股票：{}，目标权重{:.2%}'.format(stock, weight_per_stock))
-        order_target_percent(stock, weight_per_stock)
+        # 获取当前价格来计算应买入股数[4](@ref)
+        current_price = history(stock, ['close'], 1, '1d', skip_paused=True, 
+                              fq='pre', is_panel=1)['close'][-1]
+        
+        if current_price > 0:
+            # 计算目标股数（向下取整到100的整数倍）[6](@ref)
+            target_shares = int(target_value_per_stock / current_price)
+            target_shares = target_shares // 100 * 100  # 确保是100的整数倍
+            
+            if target_shares > 0:
+                # 获取当前持仓数量
+                current_holding = 0
+                if stock in context.portfolio.stock_account.positions:
+                    current_holding = context.portfolio.stock_account.positions[stock].quantity
+                
+                # 只有当目标股数与当前持仓不同时才交易[7](@ref)
+                if target_shares != current_holding:
+                    log.info('调整 {} 持仓：当前{}股，目标{}股'.format(stock, current_holding, target_shares))
+                    order_target(stock, target_shares)
+            else:
+                # 如果计算出的股数为0，清仓该股票
+                if stock in current_positions:
+                    order_target(stock, 0)
+                    log.info('清仓 {}，因目标股数为0'.format(stock))
