@@ -5,9 +5,10 @@
 # 双低策略: 总市值 + 250天换手率
 # 周期: 5天
 
-# 流动性 近 20 交易日日均换手率低于0.7%, 日均成交金额低于 1500w
+# 流动性 近 20 交易日日均换手率低于0.8%, 日均成交金额低于 2000w
 
 # type: ignore
+
 def init(context):
     # 初始化函数，全局只运行一次
     set_benchmark('000300.SH')  # 设置基准收益：沪深300指数
@@ -25,13 +26,13 @@ def init(context):
     g.last_trade_date = None  # 记录上次调仓日期
 
 def before_trading(context):
-    date = get_datetime().strftime('%Y-%m-%d %H:%M:%S')
+    date = get_datetime().strftime('%Y-%m-%d %H:%M:%S') 
 
 def handle_bar(context, bar_dict):
     g.days += 1  # 计数交易日
     
     # 检查是否到达调仓日（每5天一次）
-    if g.days % g.period != 0 and g.last_trade_date != get_datetime().date():
+    if g.days % g.period != 0 and g.last_trade_date != get_datetime().date(): 
         return  
     
     g.last_trade_date = get_datetime().date()
@@ -43,16 +44,13 @@ def handle_bar(context, bar_dict):
     liquid_pool = filter_by_liquidity(stock_pool, context, 
                                     min_turnover=0.8, min_volume=2e7) 
     
-    # 3. 财务质量过滤
-    quality_pool = filter_by_financials(liquid_pool, context)
 
-
-    if len(quality_pool) == 0:
+    if len(liquid_pool) == 0:
         log.warn('当日无符合条件的股票，跳过调仓')
         return
     
     # 2. 计算市值和换手率，并排序
-    df_stocks = get_stock_metrics(quality_pool, context)
+    df_stocks = get_stock_metrics(liquid_pool, context)
     if df_stocks is None or len(df_stocks) < g.hold_num:
         log.warn('可选股票数量不足，跳过调仓')
         return
@@ -84,7 +82,7 @@ def get_stock_pool(context):
             continue
         
         # 排除ST/*ST股票 [7](@ref)
-        name = get_security_info(stock).display_name
+        name = get_security_info(stock).display_name 
         if name is not None and ('ST' in name or '*ST' in name):
             continue
         
@@ -112,7 +110,7 @@ def filter_by_liquidity(stock_list, context, days=20, min_turnover=0.5, min_volu
     for stock in stock_list:
         try:
             # 获取历史成交数据
-            hist_data = history(stock, ['turnover_rate', 'turnover'], days, '1d', 
+            hist_data = history(stock, ['turnover_rate', 'turnover'], days, '20d', 
                               skip_paused=True, fq='pre', is_panel=1)
             
             if hist_data is None or len(hist_data) < days//2:  # 允许部分缺失
@@ -129,45 +127,7 @@ def filter_by_liquidity(stock_list, context, days=20, min_turnover=0.5, min_volu
             log.warn('流动性检查失败 {}: {}'.format(stock, e))
             continue
     
-    log.info('流动性过滤后股票数量：{}'.format(len(qualified_stocks)))
     return qualified_stocks
-
-def filter_by_financials(stock_list, context):
-    """
-    基于财务质量过滤股票，避免潜在退市风险
-    """
-    qualified_stocks = []
-    
-    for stock in stock_list:
-        try:
-            # 获取最新财务数据（示例指标，可根据需要调整）
-            current_date = get_datetime()
-            q = query(
-                income.code, income.net_profit, balance.total_liability,
-                cash_flow.net_operate_cash_flow
-            ).filter(
-                income.code == stock,
-                income.pub_date >= current_date.replace(month=1, day=1)  # 本年财报
-            )
-            
-            df = get_fundamentals(q)
-            if df.empty:
-                continue
-                
-            net_profit = df['net_profit'][0]
-            # 排除连续亏损或财务异常的公司
-            if net_profit is not None and net_profit > 0:  # 简单示例：要求盈利
-                qualified_stocks.append(stock)
-                
-        except Exception as e:
-            # 财务数据获取失败时谨慎排除
-            log.warn('财务数据获取失败 {}: {}'.format(stock, e))
-            continue
-    
-    log.info('财务质量过滤后股票数量：{}'.format(len(qualified_stocks)))
-    return qualified_stocks
-
-
 
 def get_stock_metrics(stock_list, context):
     import pandas as pd
