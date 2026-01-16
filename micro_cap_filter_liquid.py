@@ -15,7 +15,7 @@ def init(context):
     log.info('微盘股双低轮动策略开始运行')
     
     # 设置交易成本与规则
-    set_commission(PerShare(type='stock', cost=0.0002))  # 手续费万分之二
+    set_commission(PerShare(type='stock', cost=0.0))  # 手续费万分之二
     set_slippage(PriceSlippage(0.005))  # 双边滑点0.5%
     set_volume_limit(0.25, 0.5)  # 日级最大成交比例25%，分钟级50%
     

@@ -37,6 +37,17 @@ def handle_bar(context, bar_dict):
     
     g.last_trade_date = get_datetime().date()
     
+    # 检查月份：1月、4月、12月空仓
+    current_month = get_datetime().month
+    if current_month in [1, 4, 12]:
+        # 清空所有持仓
+        current_positions = list(context.portfolio.stock_account.positions.keys())
+        if len(current_positions) > 0:
+            log.info('当前为{}月，执行空仓策略，清空所有持仓'.format(current_month))
+            for stock in current_positions:
+                order_target(stock, 0)
+        return
+    
     # 1. 获取股票池
     stock_pool = get_stock_pool(context)
 
