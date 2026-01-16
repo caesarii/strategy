@@ -1,8 +1,13 @@
+# 基准策略 + 流动性过滤
+
 # 微盘股双低轮动策略
 # 股票池: 1. 排除科创板 \ 创业板 \ ST \* ST \ 退市整理股; 
 # 双低策略: 总市值 + 250天换手率
 # 周期: 5天
 
+# 流动性 近 20 交易日日均换手率低于0.7%, 日均成交金额低于 1500w
+
+# type: ignore
 def init(context):
     # 初始化函数，全局只运行一次
     set_benchmark('000300.SH')  # 设置基准收益：沪深300指数
@@ -31,14 +36,23 @@ def handle_bar(context, bar_dict):
     
     g.last_trade_date = get_datetime().date()
     
-    # 1. 获取股票池并过滤风险股票
+    # 1. 获取股票池
     stock_pool = get_stock_pool(context)
-    if len(stock_pool) == 0:
+
+    # 2. 流动性过滤
+    liquid_pool = filter_by_liquidity(stock_pool, context, 
+                                    min_turnover=0.8, min_volume=2e7) 
+    
+    # 3. 财务质量过滤
+    quality_pool = filter_by_financials(liquid_pool, context)
+
+
+    if len(quality_pool) == 0:
         log.warn('当日无符合条件的股票，跳过调仓')
         return
     
     # 2. 计算市值和换手率，并排序
-    df_stocks = get_stock_metrics(stock_pool, context)
+    df_stocks = get_stock_metrics(quality_pool, context)
     if df_stocks is None or len(df_stocks) < g.hold_num:
         log.warn('可选股票数量不足，跳过调仓')
         return
@@ -75,13 +89,85 @@ def get_stock_pool(context):
             continue
         
         # 排除退市整理股（通常名称含"退市"或代码以"退"结尾）
-        if name is not None and ('退市' in name or stock.endswith('.RT')):
+        if name is not None and ('退市' in name or '退' in name or stock.endswith('.RT')):
             continue
         
         filtered_stocks.append(stock)
     
     log.info('初步过滤后股票池数量：{}'.format(len(filtered_stocks)))
     return filtered_stocks
+
+
+
+def filter_by_liquidity(stock_list, context, days=20, min_turnover=0.5, min_volume=1e6):
+    """
+    基于流动性过滤股票
+    :param stock_list: 待过滤股票列表
+    :param days: 考察期
+    :param min_turnover: 最低日均换手率(%)
+    :param min_volume: 最低日均成交金额(万元)
+    """
+    qualified_stocks = []
+    
+    for stock in stock_list:
+        try:
+            # 获取历史成交数据
+            hist_data = history(stock, ['turnover_rate', 'turnover'], days, '1d', 
+                              skip_paused=True, fq='pre', is_panel=1)
+            
+            if hist_data is None or len(hist_data) < days//2:  # 允许部分缺失
+                continue
+                
+            avg_turnover = hist_data['turnover_rate'].mean()
+            avg_volume = hist_data['turnover'].mean()
+            
+            # 流动性筛选
+            if avg_turnover >= min_turnover and avg_volume >= min_volume:
+                qualified_stocks.append(stock)
+                
+        except Exception as e:
+            log.warn('流动性检查失败 {}: {}'.format(stock, e))
+            continue
+    
+    log.info('流动性过滤后股票数量：{}'.format(len(qualified_stocks)))
+    return qualified_stocks
+
+def filter_by_financials(stock_list, context):
+    """
+    基于财务质量过滤股票，避免潜在退市风险[8](@ref)
+    """
+    qualified_stocks = []
+    
+    for stock in stock_list:
+        try:
+            # 获取最新财务数据（示例指标，可根据需要调整）
+            current_date = get_datetime()
+            q = query(
+                income.code, income.net_profit, balance.total_liability,
+                cash_flow.net_operate_cash_flow
+            ).filter(
+                income.code == stock,
+                income.pub_date >= current_date.replace(month=1, day=1)  # 本年财报
+            )
+            
+            df = get_fundamentals(q)
+            if df.empty:
+                continue
+                
+            net_profit = df['net_profit'][0]
+            # 排除连续亏损或财务异常的公司
+            if net_profit is not None and net_profit > 0:  # 简单示例：要求盈利
+                qualified_stocks.append(stock)
+                
+        except Exception as e:
+            # 财务数据获取失败时谨慎排除
+            log.warn('财务数据获取失败 {}: {}'.format(stock, e))
+            continue
+    
+    log.info('财务质量过滤后股票数量：{}'.format(len(qualified_stocks)))
+    return qualified_stocks
+
+
 
 def get_stock_metrics(stock_list, context):
     import pandas as pd
