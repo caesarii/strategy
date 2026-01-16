@@ -3,6 +3,8 @@
 # 双低策略: 总市值 + 250天换手率
 # 周期: 5天
 
+# type: ignore
+
 def init(context):
     # 初始化函数，全局只运行一次
     set_benchmark('000300.SH')  # 设置基准收益：沪深300指数
@@ -61,7 +63,7 @@ def get_stock_pool(context):
     filtered_stocks = []
     
     for stock in all_stocks:
-        # 排除科创板（代码以688开头）[7](@ref)
+        # 排除科创板（代码以688开头
         if stock.startswith('688'):
             continue
         
@@ -69,13 +71,13 @@ def get_stock_pool(context):
         if stock.startswith('300') or stock.startswith('301'):
             continue
         
-        # 排除ST/*ST股票 [7](@ref)
+        # 排除ST/*ST股票
         name = get_security_info(stock).display_name
         if name is not None and ('ST' in name or '*ST' in name):
             continue
         
         # 排除退市整理股（通常名称含"退市"或代码以"退"结尾）
-        if name is not None and ('退市' in name or stock.endswith('.RT')):
+        if name is not None and ('退市' in name or '退' in name or stock.endswith('.RT')):
             continue
         
         filtered_stocks.append(stock)
@@ -175,9 +177,9 @@ def rebalance_portfolio(context, target_stocks):
                 # 只有当目标股数与当前持仓不同时才交易
                 if target_shares != current_holding:
                     log.info('调整 {} 持仓：当前{}股，目标{}股'.format(stock, current_holding, target_shares))
-                    order_target(stock, target_shares)
+                    order_target(stock, target_shares) 
             else:
                 # 如果计算出的股数为0，清仓该股票
                 if stock in current_positions:
-                    order_target(stock, 0)
-                    log.info('清仓 {}，因目标股数为0'.format(stock))
+                    order_target(stock, 0) 
+                    log.info('清仓 {}，因目标股数为0'.format(stock)) 
