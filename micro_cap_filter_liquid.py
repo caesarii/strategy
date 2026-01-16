@@ -15,7 +15,7 @@ def init(context):
     log.info('微盘股双低轮动策略开始运行')
     
     # 设置交易成本与规则
-    set_commission(PerShare(type='stock', cost=0.0))  # 手续费万分之二
+    set_commission(PerShare(type='stock', cost=0.0,min_trade_cost=0.0))  # 手续费万分之二
     set_slippage(PriceSlippage(0.005))  # 双边滑点0.5%
     set_volume_limit(0.25, 0.5)  # 日级最大成交比例25%，分钟级50%
     
@@ -57,7 +57,8 @@ def handle_bar(context, bar_dict):
     
     
     # 3. 按双低标准排序：先市值升序，再换手率升序
-    df_stocks = df_stocks.sort_values(['market_cap', 'turnover_250d'], ascending=[True, True])
+    df_stocks = df_stocks.sort_values(['market_cap'], [True])
+    df_stocks = df_stocks.head(400).sort_values(['turnover_250d'], [True])
     target_stocks = list(df_stocks.head(g.hold_num)['symbol'])
     
     # 4. 执行调仓
@@ -79,6 +80,10 @@ def get_stock_pool(context):
         
         # 排除创业板（代码以300、301开头）
         if stock.startswith('300') or stock.startswith('301'):
+            continue
+        
+        # 排除北交所（代码以8开头，如83、87、88等）
+        if stock.startswith('8') or stock.startswith('920'):
             continue
         
         # 排除ST/*ST股票 [7](@ref)

@@ -58,3 +58,5 @@ def get_stock_pool(context):
 
 
 你是一个资深量化策略程序员, 请基于 同花顺 supermind 平台,完成代码开发: @micro_cap_avoid_1412.py 是一个轮动周期为5天的微盘轮动策略，请在其中加入 1月、4月、12月之前提前清仓的逻辑
+
+
