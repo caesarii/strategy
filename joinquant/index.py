@@ -1,6 +1,116 @@
 # 导入函数库
 from jqdata import *
 
+
+class WyckoffSpringDetector:
+    """威科夫 Spring 假突破信号识别器"""
+
+    def __init__(self, config=None):
+        config = config or {}
+        self.lookback_period = config.get('lookback_period', 20)
+        self.recovery_period = config.get('recovery_period', 3)
+        self.volume_threshold = config.get('volume_threshold', 1.2)
+
+    def analyze(self, candles):
+        if not candles or len(candles) < self.lookback_period + self.recovery_period:
+            return {'error': 'K线数据不足，至少需要 %d 根K线' % (self.lookback_period + self.recovery_period)}
+
+        current_candle = candles[-1]
+        start_idx = -(self.lookback_period + self.recovery_period)
+        end_idx = -self.recovery_period
+        previous_candles = candles[start_idx:end_idx]
+
+        support_level = min(c['low'] for c in previous_candles)
+
+        test_range = candles[-self.recovery_period:]
+        has_broken_support = False
+        break_index = -1
+
+        for idx, candle in enumerate(test_range):
+            if candle['low'] < support_level:
+                has_broken_support = True
+                break_index = idx
+                break
+
+        is_recovered = current_candle['close'] > support_level
+
+        if has_broken_support and is_recovered:
+            break_candle = test_range[break_index]
+            avg_volume = self._calculate_avg_volume(candles[-20:-self.recovery_period])
+
+            is_low_volume_spring = break_candle.get('volume', 0) < avg_volume
+            signal_type = "Type 2 (Low Supply)" if is_low_volume_spring else "Type 1 (Shakeout)"
+
+            return {
+                'symbol': current_candle.get('symbol', 'Unknown'),
+                'type': 'WYCKOFF_SPRING',
+                'classification': signal_type,
+                'supportLevel': self._format_price(support_level),
+                'breakPrice': self._format_price(break_candle['low']),
+                'recoveryPrice': self._format_price(current_candle['close']),
+                'breakVolume': break_candle.get('volume', 0),
+                'avgVolume': round(avg_volume),
+                'volumeRatio': "%.2f" % (break_candle.get('volume', 0) / avg_volume) if avg_volume > 0 else "0.00",
+                'confidence': 'High' if is_low_volume_spring else 'Medium',
+                'timestamp': current_candle.get('timestamp', 0),
+            }
+
+        return None
+
+    def _calculate_avg_volume(self, candles):
+        if not candles:
+            return 0
+        return sum(c.get('volume', 0) for c in candles) / len(candles)
+
+    def _format_price(self, price):
+        if isinstance(price, (int, float)):
+            return round(price * 100) / 100
+        return price
+
+
+def joinquant_bars_to_candles(bars, symbol):
+    """将 get_bars 返回的结构化数组转为 WyckoffSpringDetector.analyze 所需 K 线列表。"""
+    if bars is None or len(bars) == 0:
+        return []
+    names = bars.dtype.names or ()
+    candles = []
+    for i in range(len(bars)):
+        ts = 0
+        if 'date' in names:
+            d = bars['date'][i]
+            if hasattr(d, 'strftime'):
+                ts = d.strftime('%Y-%m-%d')
+            elif hasattr(d, 'timestamp'):
+                ts = int(d.timestamp())
+        row = {
+            'open': float(bars['open'][i]),
+            'high': float(bars['high'][i]),
+            'low': float(bars['low'][i]),
+            'close': float(bars['close'][i]),
+            'volume': float(bars['volume'][i]),
+            'timestamp': ts,
+            'symbol': symbol,
+        }
+        candles.append(row)
+    return candles
+
+
+def detect_spring_on_contract(security, lookback_period=20, recovery_period=3):
+    need = lookback_period + recovery_period + 5
+    bars = get_bars(
+        security,
+        count=need,
+        unit='1d',
+        fields=['date', 'open', 'high', 'low', 'close', 'volume'],
+        include_now=False,
+    )
+    candles = joinquant_bars_to_candles(bars, security)
+    detector = WyckoffSpringDetector({
+        'lookback_period': lookback_period,
+        'recovery_period': recovery_period,
+    })
+    return detector.analyze(candles)
+
 ## 初始化函数，设定基准等等
 def initialize(context):
     # 设定沪深300作为基准
@@ -11,6 +121,7 @@ def initialize(context):
     # log.set_level('order', 'error')
     # 输出内容到日志 log.info()
     log.info('初始函数开始运行且全局只运行一次')
+    g.last_spring_signal = None  # Wyckoff Spring 最近一次检测结果（market_open 更新）
 
     ### 期货相关设定 ###
     # 设定账户为金融账户
@@ -54,6 +165,25 @@ def market_open(context):
 
     # 当月合约
     IF_current_month = g.IF_current_month
+
+    # Wyckoff Spring 信号（对当月连续合约日线，仅记录；可与下方价差逻辑组合使用）
+    spring_result = detect_spring_on_contract(IF_current_month)
+    if spring_result and 'error' in spring_result:
+        log.warning('Spring 检测: %s' % spring_result['error'])
+    elif spring_result:
+        log.info(
+            'Spring | %s | %s | 支撑=%s 收回=%s 置信=%s'
+            % (
+                spring_result.get('classification'),
+                IF_current_month,
+                spring_result.get('supportLevel'),
+                spring_result.get('recoveryPrice'),
+                spring_result.get('confidence'),
+            )
+        )
+        g.last_spring_signal = spring_result
+    else:
+        g.last_spring_signal = None
     # 下季合约
     IF_next_quarter = g.IF_next_quarter
 
