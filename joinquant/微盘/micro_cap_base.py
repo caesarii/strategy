@@ -2,21 +2,16 @@
 """
 微盘股双低轮动策略（聚宽版）
 
-逻辑来源：同花顺 Supermind 平台微盘双低系列（见仓库 supermind/微盘/ 下同类脚本）。
-本文件为迁移至聚宽（JoinQuant）后的基座策略，便于在同一套选股规则下用聚宽回测/实盘。
-
-与 Supermind 常见差异（本文件已按聚宽带目调整）：
-- 策略入口：initialize + run_weekly 回调（聚宽）；Supermind 多为 init / handle_bar。
-- 基准代码：000300.XSHG（聚宽）；Supermind 常用 000300.SH。
-- 市值查询：valuation.code 过滤标的（聚宽）；Supermind 侧常为 valuation.symbol。
-- 持仓：context.portfolio.positions[].total_amount（聚宽）；Supermind 多为 stock_account.positions[].quantity。
-
 股票池: 排除科创板、创业板、ST/*ST、退市整理股；并满足 Supermind 同构条件——总市值排名最小 400、
-前交易日收盘 ∈ (1, 15) 元、当日累计成交额 > 0.1 亿元、非涨跌停。
-选股: 先按总市值取最小 400 并过成交额/价/涨跌停；在入池标的上对「市值 + 250 日平均换手」做同步排名（权重各 1，名次相加越小越好），再取持仓。
-调仓时间: 每周五 13:00（下午 1 点，聚宽 run_weekly weekday=4）
-资金与持仓: 建议初始资金 3 万元（聚宽回测/模拟中设置）；目标持仓 15 只；调仓按当前 total_value 等权。
+前交易日收盘 ∈ (1, 15) 元（日线不复权）、上一完整交易日成交额 > 0.1 亿元、调仓时刻非涨跌停。
+选股: 先按总市值取最小 400 并过成交额/价/涨跌停；在入池标的上对「市值 + 250 日日均成交量（换手率代理）」做同步排名（权重各 1），再取持仓。
+调仓时间: 每周四开盘（run_weekly weekday=3, time=open）；回测请在聚宽中选择「日线」频率，勿用分钟线（显著加快）。
+资金与持仓: 建议初始资金 3 万元（聚宽回测/模拟中设置）；目标持仓 15 只；调仓按当前 total_value 等权；下单为限价单，价格取前一完整交易日收盘价（不复权，与入池价口径一致）。
+日志: `g.verbose_log` 控制选股侧调试信息；`log.set_level('order','error')` 关闭平台订单 INFO；调仓结束输出当前持仓明细 CSV（调仓前股数、目标股数、本次操作：买入/卖出/不变）。
 """
+
+import csv
+from io import StringIO
 
 from jqdata import *
 
@@ -25,44 +20,67 @@ def initialize(context):
     # 初始化函数，全局只运行一次
     set_option('use_real_price', True)
     set_benchmark('000300.XSHG')
-    log.info('微盘股双低轮动策略开始运行')
+    # 仅保留订单 error；隐藏「订单已委托」「order StockOrder…trade price」等系统 INFO
+    log.set_level('order', 'error')
 
     g.hold_num = 15  # 持仓股票数量
     g.initial_capital = 30000  # 与聚宽回测「初始资金」保持一致（仓位按 total_value 等权）
-    log.info('目标持仓{}只，建议初始资金{}元（请在回测/模拟设置中一致）'.format(g.hold_num, g.initial_capital))
+    # True：初始化/股票池/选股失败与跳过原因等；False：仅打印调仓买卖明细
+    g.verbose_log = False
 
-    # 设置交易成本与规则（与 Supermind 示例保持一致，具体以聚宽当前 API 为准）
-    set_commission(PerShare(type='stock', cost=0.0002, min_trade_cost=0.0))
-    set_slippage(PriceSlippage(0.005))
-    set_volume_limit(0.25, 0.5)
-    # weekday: 0–4 周一～周五，4=周五；time 为 HH:MM（此处为下午 1 点）
+    if g.verbose_log:
+        log.info('微盘股双低轮动策略开始运行')
+        log.info(
+            '目标持仓{}只，建议初始资金{}元（回测/模拟请一致）'.format(
+                g.hold_num,
+                g.initial_capital,
+            )
+        )
+
+    # 聚宽 API：OrderCost + set_order_cost（非 Supermind 的 PerShare）
+    set_order_cost(
+        OrderCost(
+            open_tax=0,
+            close_tax=0.001,  # 卖出印花税千一
+            open_commission=0.0002,
+            close_commission=0.0002,  # 买卖佣金万二
+            min_commission=0,  # 原策略无最低佣金；若平台报错可改为 5c
+        ),
+        type='stock',
+    )
+    set_slippage(PriceRelatedSlippage(0.005), type='stock')  # 按成交价 0.5% 比例滑点
+    # 聚宽无 Supermind 的 set_volume_limit；成交比例由回测撮合规则约束，拆单需自行在下单逻辑中实现
+    # 日线回测：weekday 3=周四；time='open' 与「每天」频率对齐（勿再填 09:30，否则易误用分钟回测）
     run_weekly(
         weekly_rebalance,
-        weekday=4,
-        time='13:00',
+        weekday=3,
+        time='open',
         reference_security='000300.XSHG',
     )
 
 def before_trading_start(context):
-    _ = get_datetime().strftime('%Y-%m-%d %H:%M:%S')
+    pass  # 聚宽无全局 get_datetime()，需用 context.current_dt
 
 
 def weekly_rebalance(context):
     # 1. 获取股票池并过滤风险股票
     stock_pool = get_stock_pool(context)
     if len(stock_pool) == 0:
-        log.warn('当日无符合条件的股票，跳过调仓')
+        if g.verbose_log:
+            log.warn('当日无符合条件的股票，跳过调仓')
         return
-    
+
     # 2. 计算市值与 250 日换手，在池内做同步排名（双因子等权）
     df_stocks = get_stock_metrics(stock_pool, context)
     if df_stocks is None or len(df_stocks) < g.hold_num:
-        log.warn('可选股票数量不足，跳过调仓')
+        if g.verbose_log:
+            log.warn('可选股票数量不足，跳过调仓')
         return
 
     df_stocks = df_stocks.dropna(subset=['market_cap', 'turnover_250d'])
     if len(df_stocks) < g.hold_num:
-        log.warn('有效市值/换手数据不足，跳过调仓')
+        if g.verbose_log:
+            log.warn('有效市值/换手数据不足，跳过调仓')
         return
 
     # 双低：市值越小、换手越低 → 升序排名；同步得分 = w_cap * rk_cap + w_to * rk_turnover
@@ -76,7 +94,7 @@ def weekly_rebalance(context):
     rebalance_portfolio(context, target_stocks)
 
 def after_trading_end(context):
-    _ = get_datetime().strftime('%Y-%m-%d %H:%M:%S')
+    pass
 
 
 # 与 Supermind 截图一致：0.1 亿元；前收 (1, 15)；市值最小 400；当日成交额与涨跌停过滤
@@ -88,6 +106,16 @@ _FUND_BATCH = 800
 # 入池后同步排名权重（市值因子、换手率因子均为 1）
 _SYNC_RANK_W_CAP = 1.0
 _SYNC_RANK_W_TO = 1.0
+
+
+def _prev_trading_day_close_unadjusted(code):
+    """前一完整交易日收盘价（不复权），与 get_stock_pool 中价格区间过滤一致。"""
+    h = attribute_history(
+        code, 1, '1d', ['close'], skip_paused=True, df=True, fq='none',
+    )
+    if h is None or h.empty:
+        return 0.0
+    return float(h['close'].iloc[-1])
 
 
 def get_stock_pool(context):
@@ -108,7 +136,8 @@ def get_stock_pool(context):
         filtered_stocks.append(stock)
 
     if not filtered_stocks:
-        log.warn('基础过滤后股票池为空')
+        if g.verbose_log:
+            log.warn('基础过滤后股票池为空')
         return []
 
     # 总市值排名最小 400（在基础池内以市值升序取前 400）
@@ -131,7 +160,8 @@ def get_stock_pool(context):
             if c > 0:
                 cap_pairs.append((code, c))
     if not cap_pairs:
-        log.warn('无法取得市值数据，股票池为空')
+        if g.verbose_log:
+            log.warn('无法取得市值数据，股票池为空')
         return []
     cap_pairs.sort(key=lambda x: x[1])
     cap_candidates = [p[0] for p in cap_pairs[:_CAP_SMALLEST_N]]
@@ -144,14 +174,24 @@ def get_stock_pool(context):
             if bar.paused or bar.last_price <= 0:
                 continue
 
-            money = getattr(bar, 'money', None)
-            if money is None:
-                money = 0
-            try:
-                money = float(money)
-            except (TypeError, ValueError):
-                money = 0
-            if money < _MIN_DAILY_MONEY:
+            # 成交额：用「上一完整交易日」日线 money；开盘附近当日累计常远小于全天，不宜与 0.1 亿直接比。
+            hist = attribute_history(
+                stock,
+                1,
+                '1d',
+                ['close', 'money'],
+                skip_paused=True,
+                df=True,
+                fq='none',
+            )
+            if hist is None or hist.empty:
+                continue
+            day_money = float(hist['money'].iloc[-1])
+            if day_money < _MIN_DAILY_MONEY:
+                continue
+            # 前收区间与大众行情「收盘价」一致，用不复权
+            prev_close = float(hist['close'].iloc[-1])
+            if not (_PREV_CLOSE_MIN < prev_close < _PREV_CLOSE_MAX):
                 continue
 
             if bar.high_limit > 0 and bar.last_price >= bar.high_limit - 1e-8:
@@ -159,33 +199,19 @@ def get_stock_pool(context):
             if bar.low_limit > 0 and bar.last_price <= bar.low_limit + 1e-8:
                 continue
 
-            ph = attribute_history(
-                stock,
-                1,
-                '1d',
-                ['close'],
-                skip_paused=True,
-                df=True,
-                fq='pre',
-            )
-            if ph is None or ph.empty:
-                continue
-            prev_close = float(ph['close'].iloc[-1])
-            if not (_PREV_CLOSE_MIN < prev_close < _PREV_CLOSE_MAX):
-                continue
-
             result.append(stock)
         except Exception:
             continue
 
-    log.info(
-        '股票池：基础{}只 → 市值最小{}候选{}只 → 成交额/价/涨跌停后{}只'.format(
-            len(filtered_stocks),
-            _CAP_SMALLEST_N,
-            len(cap_candidates),
-            len(result),
+    if g.verbose_log:
+        log.info(
+            '股票池：基础{}只 → 市值最小{}候选{}只 → 成交额/价/涨跌停后{}只'.format(
+                len(filtered_stocks),
+                _CAP_SMALLEST_N,
+                len(cap_candidates),
+                len(result),
+            )
         )
-    )
     return result
 
 def get_stock_metrics(stock_list, context):
@@ -197,7 +223,7 @@ def get_stock_metrics(stock_list, context):
             # 获取总市值（亿元）
             fundamental_data = get_fundamentals(
                 query(valuation.market_cap).filter(valuation.code == stock),
-                get_datetime(),
+                date=context.current_dt,
             )
             
             if fundamental_data.empty:
@@ -206,21 +232,20 @@ def get_stock_metrics(stock_list, context):
             market_cap_value = fundamental_data.iloc[0, 0] / 1e8  # 转换为亿元
             
             
-            # 获取过去250日换手率数据
-            turnover_data = history(
-                stock, 
-                ['turnover_rate'], 
-                250, 
-                '1d', 
-                False, 
-                'pre', 
-                is_panel=0
+            # 聚宽无 Supermind 的 history(..., is_panel=)；日线亦无便捷 250 日换手率序列。
+            # 用 250 交易日日均成交量作「换手/流动性」代理，列名仍为 turnover_250d 以供同步排名。
+            vol_df = attribute_history(
+                stock,
+                250,
+                '1d',
+                ['volume'],
+                skip_paused=True,
+                df=True,
+                fq='pre',
             )
-            
-            if len(turnover_data) == 0:
+            if vol_df is None or vol_df.empty or len(vol_df) < 50:
                 continue
-                
-            turnover_250d = turnover_data['turnover_rate'].mean()  # 250日平均换手率
+            turnover_250d = float(vol_df['volume'].mean())
             
             data_list.append({
                 'symbol': stock,  
@@ -229,60 +254,157 @@ def get_stock_metrics(stock_list, context):
             })
             
         except Exception as e:
-            log.warn('股票{}数据获取失败: {}'.format(stock, str(e)))
+            if g.verbose_log:
+                log.warn('股票{}数据获取失败: {}'.format(stock, str(e)))
             continue
-    
+
     if len(data_list) == 0:
         return None
-        
+
     return pd.DataFrame(data_list)
 
 def rebalance_portfolio(context, target_stocks):
-    current_positions = [
-        s for s in context.portfolio.positions
-        if context.portfolio.positions[s].total_amount > 0
-    ]
-    
-    # 如果目标股票列表为空，清空所有持仓
+    holdings_before = {}
+    for s in context.portfolio.positions:
+        amt = int(context.portfolio.positions[s].total_amount)
+        if amt > 0:
+            holdings_before[s] = amt
+
+    cdpx = get_current_data()
+    # 每项: [代码, 名称, 当前股数, 目标股数, 本次操作, 参考价, 变动股数, 备注]
+    summary_rows = []
+
+    def _stock_display(code):
+        inf = get_security_info(code)
+        return inf.display_name if inf and getattr(inf, 'display_name', None) else code
+
+    def _ref_price(code):
+        p = _prev_trading_day_close_unadjusted(code)
+        if p > 0:
+            return p
+        bar = cdpx[code]
+        p = float(bar.last_price) if bar and bar.last_price and bar.last_price > 0 else 0.0
+        if p <= 0:
+            h1 = attribute_history(
+                code, 1, '1d', ['close'], skip_paused=True, df=True, fq='pre',
+            )
+            if h1 is not None and not h1.empty:
+                p = float(h1['close'].iloc[-1])
+        return p
+
+    def _order_style(code):
+        px = _ref_price(code)
+        if px <= 0:
+            return None
+        return LimitOrderStyle(round(px, 2))
+
+    def _append_row(stock, cur, tgt, action, px, delta, note):
+        summary_rows.append(
+            [
+                stock,
+                _stock_display(stock),
+                cur,
+                tgt,
+                action,
+                round(px, 3) if px and px > 0 else '',
+                delta if delta is not None else '',
+                note,
+            ]
+        )
+
+    def _emit_rebalance_summary():
+        if not summary_rows:
+            return
+        ts = context.current_dt.strftime('%Y-%m-%d %H:%M:%S')
+        buf = StringIO()
+        w = csv.writer(buf, lineterminator='\n')
+        w.writerow(
+            [
+                '调仓时间',
+                '代码',
+                '名称',
+                '当前股数',
+                '目标股数',
+                '本次操作',
+                '参考价',
+                '变动股数',
+                '备注',
+            ]
+        )
+        for row in summary_rows:
+            w.writerow([ts] + row)
+        log.info('持仓明细CSV\n{}'.format(buf.getvalue().rstrip('\n')))
+
     if len(target_stocks) == 0:
-        for stock in current_positions:
-            order_target(stock, 0)  # 清仓
+        for stock in sorted(holdings_before.keys()):
+            q = holdings_before[stock]
+            px = _ref_price(stock)
+            _append_row(stock, q, 0, '卖出', px, -q, '清仓')
+            sty = _order_style(stock)
+            if sty is not None:
+                order_target(stock, 0, sty)
+            else:
+                order_target(stock, 0)
+        _emit_rebalance_summary()
         return
-    
-    # 计算每只股票应分配的资金（等权重）
+
     total_value = context.portfolio.total_value
     weight_per_stock = 1.0 / len(target_stocks)
     target_value_per_stock = total_value * weight_per_stock
-    
-    # 卖出当前持仓中不在目标列表的股票
-    for stock in current_positions:
-        if stock not in target_stocks:
-            log.info('卖出不在目标列表的股票：{}'.format(stock))
-            order_target(stock, 0)  
-    
-    # 对目标股票进行等权重配置
+
+    target_qty = {}
     for stock in target_stocks:
-        # 获取当前价格来计算应买入股数
-        current_price = history(stock, ['close'], 1, '1d', skip_paused=True, 
-                              fq='pre', is_panel=1)['close'][-1]
-        
-        if current_price > 0:
-            # 计算目标股数（向下取整到100的整数倍）
-            target_shares = int(target_value_per_stock / current_price)
-            target_shares = target_shares // 100 * 100  # 确保是100的整数倍
-            
-            if target_shares > 0:
-                # 获取当前持仓数量
-                current_holding = 0
-                if stock in context.portfolio.positions:
-                    current_holding = context.portfolio.positions[stock].total_amount
-                
-                # 只有当目标股数与当前持仓不同时才交易
-                if target_shares != current_holding:
-                    log.info('调整 {} 持仓：当前{}股，目标{}股'.format(stock, current_holding, target_shares))
-                    order_target(stock, target_shares) 
+        px = _ref_price(stock)
+        if px > 0:
+            t = int(target_value_per_stock / px)
+            target_qty[stock] = t // 100 * 100
+        else:
+            target_qty[stock] = None
+
+    for stock in sorted(s for s in holdings_before if s not in target_stocks):
+        q = holdings_before[stock]
+        px = _ref_price(stock)
+        _append_row(stock, q, 0, '卖出', px, -q, '调出')
+        sty = _order_style(stock)
+        if sty is not None:
+            order_target(stock, 0, sty)
+        else:
+            order_target(stock, 0)
+
+    for stock in target_stocks:
+        cur = holdings_before.get(stock, 0)
+        px = _ref_price(stock)
+        tgt = target_qty.get(stock)
+
+        if tgt is None:
+            _append_row(stock, cur, '', '不变', px, '', '无参考价')
+            continue
+
+        if tgt > 0:
+            if tgt > cur:
+                action = '买入'
+            elif tgt < cur:
+                action = '卖出'
             else:
-                # 如果计算出的股数为0，清仓该股票
-                if stock in current_positions:
-                    order_target(stock, 0) 
-                    log.info('清仓 {}，因目标股数为0'.format(stock)) 
+                action = '不变'
+            delta = tgt - cur
+            note = '新进' if cur == 0 and tgt > 0 else ''
+            _append_row(stock, cur, tgt, action, px, delta, note)
+            if tgt != cur:
+                sty = _order_style(stock)
+                if sty is not None:
+                    order_target(stock, tgt, sty)
+                else:
+                    order_target(stock, tgt)
+        else:
+            if cur > 0:
+                _append_row(stock, cur, 0, '卖出', px, -cur, '不足一手')
+                sty = _order_style(stock)
+                if sty is not None:
+                    order_target(stock, 0, sty)
+                else:
+                    order_target(stock, 0)
+            else:
+                _append_row(stock, 0, 0, '不变', px, 0, '不足一手')
+
+    _emit_rebalance_summary()
