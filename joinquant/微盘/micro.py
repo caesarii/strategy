@@ -21,7 +21,7 @@ from jqfactor import get_factor_values  # type: ignore
 
 def initialize(context):
     set_option('use_real_price', True)
-    set_benchmark('000300.XSHG')
+    set_benchmark('932000.XSHG')
     log.set_level('order', 'error')
 
     g.hold_num = 15
@@ -73,8 +73,10 @@ def weekly_rebalance(context):
     sync = _SYNC_RANK_W_CAP * rk_cap + _SYNC_RANK_W_LIQ * rk_liq
     df_stocks = df_stocks.assign(_sync_score=sync).sort_values('_sync_score', ascending=True)
 
-    target_stocks = list(df_stocks.head(g.hold_num)['symbol'])
-    rebalance_portfolio(context, target_stocks)
+    df_target = df_stocks.head(g.hold_num).reset_index(drop=True)
+    target_stocks = list(df_target['symbol'])
+    rank_map = {row['symbol']: idx + 1 for idx, row in df_target.iterrows()}
+    rebalance_portfolio(context, target_stocks, rank_map)
 
 
 def after_trading_end(context):
@@ -84,7 +86,7 @@ def after_trading_end(context):
 # 与 `micro_cap_base.py` 对齐的过滤条件
 _MIN_DAILY_MONEY = 1e7  # 0.1 亿
 _PREV_CLOSE_MIN = 1.0
-_PREV_CLOSE_MAX = 30.0
+_PREV_CLOSE_MAX = 20.0
 _CAP_SMALLEST_N = 400
 _FUND_BATCH = 800
 
@@ -227,7 +229,7 @@ def get_stock_metrics(stock_list, context):
     return pd.DataFrame(data_list)
 
 
-def rebalance_portfolio(context, target_stocks):
+def rebalance_portfolio(context, target_stocks, rank_map=None):
     holdings_before = {}
     for s in context.portfolio.positions:
         amt = int(context.portfolio.positions[s].total_amount)
@@ -261,8 +263,10 @@ def rebalance_portfolio(context, target_stocks):
         return LimitOrderStyle(round(px, 2))
 
     def _append_row(stock, cur, tgt, action, px, delta, note):
+        rank = rank_map.get(stock, '') if rank_map else ''
         summary_rows.append(
             [
+                rank,
                 stock,
                 _stock_display(stock),
                 cur,
@@ -277,11 +281,12 @@ def rebalance_portfolio(context, target_stocks):
     def _emit_rebalance_summary():
         if not summary_rows:
             return
+        sorted_rows = sorted(summary_rows, key=lambda r: (r[0] if isinstance(r[0], int) else 9999))
         ts = context.current_dt.strftime('%Y-%m-%d %H:%M:%S')
         buf = StringIO()
         w = csv.writer(buf, lineterminator='\n')
-        w.writerow(['调仓时间', '代码', '名称', '当前股数', '目标股数', '本次操作', '参考价', '变动股数', '备注'])
-        for row in summary_rows:
+        w.writerow(['调仓时间', '排名', '代码', '名称', '当前股数', '目标股数', '本次操作', '参考价', '变动股数', '备注'])
+        for row in sorted_rows:
             w.writerow([ts] + row)
         log.info('持仓明细CSV\n{}'.format(buf.getvalue().rstrip('\n')))
 
