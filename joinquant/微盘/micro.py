@@ -21,10 +21,13 @@ from jqfactor import get_factor_values  # type: ignore
 
 def initialize(context):
     set_option('use_real_price', True)
-    set_benchmark('932000.XSHG')
+    # 中证2000(932000.XSHG) 在部分聚宽回测环境不存在；国证2000 与小微盘风格更接近
+    # 若仍报错可改为：000852.XSHG（中证1000）或 000300.XSHG（沪深300）
+    set_benchmark('399303.XSHE')
     log.set_level('order', 'error')
 
     g.hold_num = 15
+    g.candidate_num = 20
     g.initial_capital = 30000
     g.verbose_log = False
 
@@ -73,10 +76,12 @@ def weekly_rebalance(context):
     sync = _SYNC_RANK_W_CAP * rk_cap + _SYNC_RANK_W_LIQ * rk_liq
     df_stocks = df_stocks.assign(_sync_score=sync).sort_values('_sync_score', ascending=True)
 
-    df_target = df_stocks.head(g.hold_num).reset_index(drop=True)
+    df_candidate = df_stocks.head(g.candidate_num).reset_index(drop=True)
+    df_target = df_candidate.head(g.hold_num).reset_index(drop=True)
     target_stocks = list(df_target['symbol'])
-    rank_map = {row['symbol']: idx + 1 for idx, row in df_target.iterrows()}
-    rebalance_portfolio(context, target_stocks, rank_map)
+    backup_stocks = list(df_candidate.iloc[g.hold_num:]['symbol'])
+    rank_map = {row['symbol']: idx + 1 for idx, row in df_candidate.iterrows()}
+    rebalance_portfolio(context, target_stocks, backup_stocks, rank_map)
 
 
 def after_trading_end(context):
@@ -119,6 +124,7 @@ def get_stock_pool(context):
     filtered_stocks = []
 
     min_list_days = 120
+    cd = get_current_data()
     for stock in all_stocks:
         if stock.startswith('688'):
             continue
@@ -127,10 +133,11 @@ def get_stock_pool(context):
         if stock.startswith('8') or stock.startswith('920'):
             continue
 
+        if cd[stock].is_st:
+            continue
+
         info = get_security_info(stock)
         name = info.display_name
-        if name is not None and ('ST' in name or '*ST' in name):
-            continue
         if name is not None and ('退市' in name or '退' in name or stock.endswith('.RT')):
             continue
 
@@ -167,7 +174,6 @@ def get_stock_pool(context):
     size_pairs.sort(key=lambda x: x[1])
     cap_candidates = [p[0] for p in size_pairs[:_CAP_SMALLEST_N]]
 
-    cd = get_current_data()
     result = []
     for stock in cap_candidates:
         try:
@@ -229,7 +235,8 @@ def get_stock_metrics(stock_list, context):
     return pd.DataFrame(data_list)
 
 
-def rebalance_portfolio(context, target_stocks, rank_map=None):
+def rebalance_portfolio(context, target_stocks, backup_stocks=None, rank_map=None):
+    backup_stocks = backup_stocks or []
     holdings_before = {}
     for s in context.portfolio.positions:
         amt = int(context.portfolio.positions[s].total_amount)
@@ -321,7 +328,7 @@ def rebalance_portfolio(context, target_stocks, rank_map=None):
         sty = _order_style(stock)
         order_target(stock, 0, sty) if sty is not None else order_target(stock, 0)
 
-    # 买入/调整：目标池
+    # 买入/调整：目标池前 g.hold_num 只
     for stock in target_stocks:
         cur = holdings_before.get(stock, 0)
         px = _ref_price(stock)
@@ -347,4 +354,46 @@ def rebalance_portfolio(context, target_stocks, rank_map=None):
             else:
                 _append_row(stock, 0, 0, '不变', px, 0, '不足一手')
 
+    # 备选补买：先按前 15 只等权计算后，如果仍有剩余预算，则按备选排序补买
+    planned_core_value = 0.0
+    for stock in target_stocks:
+        qty = target_qty.get(stock)
+        if qty is None or qty <= 0:
+            continue
+        px = _ref_price(stock)
+        if px > 0:
+            planned_core_value += qty * px
+
+    remaining_budget = max(float(total_value) - planned_core_value, 0.0)
+    if remaining_budget > 0 and backup_stocks:
+        for idx, stock in enumerate(backup_stocks):
+            # 仅在补买时引入新仓，避免和前面的调出/卖出指令互相覆盖
+            if holdings_before.get(stock, 0) > 0:
+                continue
+
+            px = _ref_price(stock)
+            if px <= 0:
+                continue
+
+            remain_cnt = max(len(backup_stocks) - idx, 1)
+            alloc = remaining_budget / remain_cnt
+            qty = int(alloc / px) // 100 * 100
+            if qty <= 0:
+                qty = int(remaining_budget / px) // 100 * 100
+            if qty <= 0:
+                continue
+
+            cost = qty * px
+            if cost > remaining_budget + 1e-8:
+                continue
+
+            _append_row(stock, 0, qty, '买入', px, qty, '备选补买')
+            sty = _order_style(stock)
+            order_target(stock, qty, sty) if sty is not None else order_target(stock, qty)
+            remaining_budget -= cost
+
+            if remaining_budget < px * 100:
+                break
+
     _emit_rebalance_summary()
+    log.info('调仓后现金余额：{:.2f}'.format(float(getattr(context.portfolio, 'cash', 0.0))))
