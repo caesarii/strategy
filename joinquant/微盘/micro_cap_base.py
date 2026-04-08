@@ -3,10 +3,10 @@
 微盘股双低轮动策略（聚宽版）
 
 股票池: 排除科创板、创业板、ST/*ST、退市整理股；并满足 Supermind 同构条件——总市值排名最小 400、
-前交易日收盘 ∈ (1, 15) 元（日线不复权）、上一完整交易日成交额 > 0.1 亿元、调仓时刻非涨跌停。
+调仓日收盘 ∈ (1, 15) 元（日线不复权）、调仓日成交额 > 0.1 亿元、调仓时刻非涨跌停。
 选股: 先按总市值取最小 400 并过成交额/价/涨跌停；在入池标的上对「市值 + 250 日日均成交量（换手率代理）」做同步排名（权重各 1），再取持仓。
-调仓时间: 每周四开盘（run_weekly weekday=3, time=open）；回测请在聚宽中选择「日线」频率，勿用分钟线（显著加快）。
-资金与持仓: 建议初始资金 3 万元（聚宽回测/模拟中设置）；目标持仓 15 只；调仓按当前 total_value 等权；下单为限价单，价格取前一完整交易日收盘价（不复权，与入池价口径一致）。
+调仓时间: 每周三收盘后（run_weekly weekday=2, time=close）；周三非交易日时聚宽按 reference_security 顺延至最近交易日收盘。回测请用「日线」。
+资金与持仓: 建议初始资金 3 万元（聚宽回测/模拟中设置）；目标持仓 15 只；调仓按当前 total_value 等权；下单为限价单，价格取调仓日收盘价（不复权，与入池价口径一致）。
 日志: `g.verbose_log` 控制选股侧调试信息；`log.set_level('order','error')` 关闭平台订单 INFO；调仓结束输出当前持仓明细 CSV（调仓前股数、目标股数、本次操作：买入/卖出/不变）。
 """
 
@@ -50,16 +50,13 @@ def initialize(context):
     )
     set_slippage(PriceRelatedSlippage(0.005), type='stock')  # 按成交价 0.5% 比例滑点
     # 聚宽无 Supermind 的 set_volume_limit；成交比例由回测撮合规则约束，拆单需自行在下单逻辑中实现
-    # 日线回测：weekday 3=周四；time='open' 与「每天」频率对齐（勿再填 09:30，否则易误用分钟回测）
+    # 日线回测：weekday 2=周三；time='close' 在当日收盘后触发，日线数据按调仓日已走完的 K 线取用
     run_weekly(
         weekly_rebalance,
-        weekday=3,
-        time='open',
+        weekday=2,
+        time='close',
         reference_security='000300.XSHG',
     )
-
-def before_trading_start(context):
-    pass  # 聚宽无全局 get_datetime()，需用 context.current_dt
 
 
 def weekly_rebalance(context):
@@ -97,7 +94,7 @@ def after_trading_end(context):
     pass
 
 
-# 与 Supermind 截图一致：0.1 亿元；前收 (1, 15)；市值最小 400；当日成交额与涨跌停过滤
+# 与 Supermind 截图一致：0.1 亿元；收盘 (1, 15)；市值最小 400；调仓日成交额与涨跌停过滤
 _MIN_DAILY_MONEY = 1e7  # 0.1 亿 = 1e7 元
 _PREV_CLOSE_MIN = 1.0
 _PREV_CLOSE_MAX = 15.0
@@ -108,14 +105,24 @@ _SYNC_RANK_W_CAP = 1.0
 _SYNC_RANK_W_TO = 1.0
 
 
-def _prev_trading_day_close_unadjusted(code):
-    """前一完整交易日收盘价（不复权），与 get_stock_pool 中价格区间过滤一致。"""
-    h = attribute_history(
-        code, 1, '1d', ['close'], skip_paused=True, df=True, fq='none',
+def _rebalance_day_close_money_unadjusted(code):
+
+    hist = attribute_history(
+        code,
+        1,
+        '1d',
+        ['close', 'money'],
+        skip_paused=True,
+        df=True,
+        fq='none',
     )
-    if h is None or h.empty:
-        return 0.0
-    return float(h['close'].iloc[-1])
+    if hist is None or hist.empty:
+        return None, None
+    row = hist.iloc[-1]
+    try:
+        return float(row['close']), float(row['money'])
+    except (TypeError, ValueError, KeyError):
+        return None, None
 
 
 def get_stock_pool(context):
@@ -174,24 +181,12 @@ def get_stock_pool(context):
             if bar.paused or bar.last_price <= 0:
                 continue
 
-            # 成交额：用「上一完整交易日」日线 money；开盘附近当日累计常远小于全天，不宜与 0.1 亿直接比。
-            hist = attribute_history(
-                stock,
-                1,
-                '1d',
-                ['close', 'money'],
-                skip_paused=True,
-                df=True,
-                fq='none',
-            )
-            if hist is None or hist.empty:
+            day_close, day_money = _rebalance_day_close_money_unadjusted(stock)
+            if day_close is None or day_money is None:
                 continue
-            day_money = float(hist['money'].iloc[-1])
             if day_money < _MIN_DAILY_MONEY:
                 continue
-            # 前收区间与大众行情「收盘价」一致，用不复权
-            prev_close = float(hist['close'].iloc[-1])
-            if not (_PREV_CLOSE_MIN < prev_close < _PREV_CLOSE_MAX):
+            if not (_PREV_CLOSE_MIN < day_close < _PREV_CLOSE_MAX):
                 continue
 
             if bar.high_limit > 0 and bar.last_price >= bar.high_limit - 1e-8:
@@ -279,7 +274,8 @@ def rebalance_portfolio(context, target_stocks):
         return inf.display_name if inf and getattr(inf, 'display_name', None) else code
 
     def _ref_price(code):
-        p = _prev_trading_day_close_unadjusted(code)
+        p, _ = _rebalance_day_close_money_unadjusted(code)
+        p = p if p is not None else 0.0
         if p > 0:
             return p
         bar = cdpx[code]
