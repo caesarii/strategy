@@ -1,19 +1,34 @@
-# 微盘股双低轮动策略
-# 股票池: 1. 排除科创板 \ 创业板 \ ST \* ST \ 退市整理股; 
-# 双低策略: 总市值 + 250天换手率
-# 周期: 5天
+# -*- coding: utf-8 -*-
+"""
+微盘股双低轮动策略（聚宽版）
 
-# type: ignore
+逻辑来源：同花顺 Supermind 平台微盘双低系列（见仓库 supermind/微盘/ 下同类脚本）。
+本文件为迁移至聚宽（JoinQuant）后的基座策略，便于在同一套选股规则下用聚宽回测/实盘。
 
-def init(context):
+与 Supermind 常见差异（本文件已按聚宽带目调整）：
+- 策略入口：initialize / handle_data（聚宽）；Supermind 多为 init / handle_bar。
+- 基准代码：000300.XSHG（聚宽）；Supermind 常用 000300.SH。
+- 市值查询：valuation.code 过滤标的（聚宽）；Supermind 侧常为 valuation.symbol。
+- 持仓：context.portfolio.positions[].total_amount（聚宽）；Supermind 多为 stock_account.positions[].quantity。
+
+股票池: 排除科创板、创业板、ST/*ST、退市整理股
+双低: 总市值（升序）+ 250 日平均换手率（升序）
+调仓周期: 5 个交易日
+"""
+
+from jqdata import *
+
+
+def initialize(context):
     # 初始化函数，全局只运行一次
-    set_benchmark('000300.SH')  # 设置基准收益：沪深300指数
+    set_option('use_real_price', True)
+    set_benchmark('000300.XSHG')
     log.info('微盘股双低轮动策略开始运行')
-    
-    # 设置交易成本与规则
-    set_commission(PerShare(type='stock', cost=0.0002,min_trade_cost=0.0))  # 手续费万分之二
-    set_slippage(PriceSlippage(0.005))  # 双边滑点0.5%
-    set_volume_limit(0.25, 0.5)  # 日级最大成交比例25%，分钟级50%
+
+    # 设置交易成本与规则（与 Supermind 示例保持一致，具体以聚宽当前 API 为准）
+    set_commission(PerShare(type='stock', cost=0.0002, min_trade_cost=0.0))
+    set_slippage(PriceSlippage(0.005))
+    set_volume_limit(0.25, 0.5)
     
     # 设置策略参数
     g.hold_num = 20  # 持仓股票数量
@@ -21,10 +36,11 @@ def init(context):
     g.days = 0  # 交易计数器
     g.last_trade_date = None  # 记录上次调仓日期
 
-def before_trading(context):
-    date = get_datetime().strftime('%Y-%m-%d %H:%M:%S')
+def before_trading_start(context):
+    _ = get_datetime().strftime('%Y-%m-%d %H:%M:%S')
 
-def handle_bar(context, bar_dict):
+
+def handle_data(context, data):
     g.days += 1  # 计数交易日
     
     # 检查是否到达调仓日（每5天一次）
@@ -56,8 +72,8 @@ def handle_bar(context, bar_dict):
     # 4. 执行调仓
     rebalance_portfolio(context, target_stocks)
 
-def after_trading(context):
-    time = get_datetime().strftime('%Y-%m-%d %H:%M:%S')
+def after_trading_end(context):
+    _ = get_datetime().strftime('%Y-%m-%d %H:%M:%S')
 
 
 def get_stock_pool(context):
@@ -96,8 +112,8 @@ def get_stock_metrics(stock_list, context):
         try:
             # 获取总市值（亿元）
             fundamental_data = get_fundamentals(
-                query(valuation.market_cap).filter(valuation.symbol == stock), 
-                get_datetime()
+                query(valuation.market_cap).filter(valuation.code == stock),
+                get_datetime(),
             )
             
             if fundamental_data.empty:
@@ -138,9 +154,10 @@ def get_stock_metrics(stock_list, context):
     return pd.DataFrame(data_list)
 
 def rebalance_portfolio(context, target_stocks):
-    
-    # 获取当前持仓股票列表
-    current_positions = list(context.portfolio.stock_account.positions.keys())
+    current_positions = [
+        s for s in context.portfolio.positions
+        if context.portfolio.positions[s].total_amount > 0
+    ]
     
     # 如果目标股票列表为空，清空所有持仓
     if len(target_stocks) == 0:
@@ -156,7 +173,6 @@ def rebalance_portfolio(context, target_stocks):
     # 卖出当前持仓中不在目标列表的股票
     for stock in current_positions:
         if stock not in target_stocks:
-            # 记录日志[4](@ref)
             log.info('卖出不在目标列表的股票：{}'.format(stock))
             order_target(stock, 0)  
     
@@ -174,8 +190,8 @@ def rebalance_portfolio(context, target_stocks):
             if target_shares > 0:
                 # 获取当前持仓数量
                 current_holding = 0
-                if stock in context.portfolio.stock_account.positions:
-                    current_holding = context.portfolio.stock_account.positions[stock].quantity
+                if stock in context.portfolio.positions:
+                    current_holding = context.portfolio.positions[stock].total_amount
                 
                 # 只有当目标股数与当前持仓不同时才交易
                 if target_shares != current_holding:
