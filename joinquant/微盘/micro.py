@@ -28,6 +28,8 @@ def initialize(context):
 
     g.hold_num = 15
     g.candidate_num = 20
+    g.rebalance_interval_weeks = 2
+    g.week_counter = 0
     g.initial_capital = 30000
     g.verbose_log = False
 
@@ -52,6 +54,12 @@ def initialize(context):
 
 
 def weekly_rebalance(context):
+    g.week_counter += 1
+    if g.week_counter % g.rebalance_interval_weeks != 1:
+        if g.verbose_log:
+            log.info('跳过本周调仓（双周频率）')
+        return
+
     stock_pool = get_stock_pool(context)
     if not stock_pool:
         if g.verbose_log:
