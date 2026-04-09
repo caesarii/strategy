@@ -385,9 +385,9 @@ def rebalance_portfolio(context, target_stocks, backup_stocks=None, rank_map=Non
 
             remain_cnt = max(len(backup_stocks) - idx, 1)
             alloc = remaining_budget / remain_cnt
+            # 只按「当前剩余备选均分」的份额买；不可用整份 remaining_budget 回退，
+            # 否则在 alloc 不足一手时会把几乎全部余钱堆到第一只备选（破坏等权意图）。
             qty = int(alloc / px) // 100 * 100
-            if qty <= 0:
-                qty = int(remaining_budget / px) // 100 * 100
             if qty <= 0:
                 continue
 
